@@ -14,17 +14,17 @@ def download_model(url: str, output_path: Path):
 
 
 def download_llm_model():
-    model_path = Path("models/llama-3.2-3b-instruct.gguf")
+    model_path = Path("models/qwen2.5-3b-instruct-q4_k_m.gguf")
 
     if model_path.exists():
         print("LLM model already exists, skipping download")
         return
 
-    url = "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf"
+    url = "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
 
     model_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print("Downloading LLM model (2GB, may take several minutes)...")
+    print("Downloading LLM model (2.0GB, may take several minutes)...")
     urllib.request.urlretrieve(url, model_path)
     print("LLM model downloaded!")
 
