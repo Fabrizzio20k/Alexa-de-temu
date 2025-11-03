@@ -2,22 +2,31 @@ from llama_cpp import Llama
 from pathlib import Path
 from datetime import datetime
 import pytz
+import os
 
 
 class LLMService:
     def __init__(self):
-        model_path = Path("models/qwen2.5-3b-instruct-q4_k_m.gguf")
+        model_path = Path("models/soob3123_amoral-gemma3-12B-Q4_K_M.gguf")
         self.llm = Llama(
             model_path=str(model_path),
-            n_ctx=2048,
-            n_threads=24,
+            n_ctx=4096,
+            n_threads=os.cpu_count() - 2,
             n_batch=512,
-            n_gpu_layers=0,
-            verbose=False
+            n_gpu_layers=-1,
+            verbose=False,
+            use_mlock=True,
+            use_mmap=True,
         )
 
     def _is_question_not_command(self, request: str) -> bool:
         request_lower = request.lower()
+
+        conditional_commands = ['si crees',
+                                'si piensas', 'si consideras', 'si ves que']
+        if any(cond in request_lower for cond in conditional_commands):
+            return False
+
         question_indicators = [
             '¿', '?',
             'debería', 'deberia', 'debo', 'puedo', 'podría', 'podria',
@@ -58,8 +67,7 @@ class LLMService:
             'bulbs': context['bulbs']
         }
 
-        exception_words = ['menos', 'excepto', 'pero no', 'salvo',
-                           'sin', 'menos el', 'menos la', 'menos las', 'menos los']
+        exception_words = ['menos', 'excepto', 'pero no', 'salvo', 'sin']
         has_exception = any(
             word in request_normalized for word in exception_words)
 
@@ -67,29 +75,38 @@ class LLMService:
                         'bombillas', 'lampara', 'lamparas', 'iluminacion']
         ventilador_patterns = ['ventilador',
                                'ventiladores', 'abanico', 'aire', 'fan']
-        persiana_patterns = ['persiana', 'persianas',
-                             'cortina', 'cortinas', 'ventana', 'ventanas']
+        persiana_patterns = ['persiana', 'persianas', 'perciana',
+                             'percianas', 'cortina', 'cortinas', 'ventana', 'ventanas']
 
-        on_commands = ['enciende', 'encienda', 'prende', 'prenda', 'activa',
-                       'encender', 'prender', 'activar', 'encendeme', 'prendeme']
+        on_commands = ['enciende', 'encienda', 'enciente', 'prende', 'prenda',
+                       'activa', 'encender', 'prender', 'activar', 'encendeme', 'prendeme']
         off_commands = ['apaga', 'apague', 'apagar',
                         'desactiva', 'desactivar', 'apagame']
         open_commands = ['abre', 'abrir', 'sube', 'subir',
                          'levanta', 'levantar', 'abrime', 'subeme']
-        close_commands = ['cierra', 'cerrar',
-                          'baja', 'bajar', 'cierrame', 'bajame']
+        close_commands = ['cierra', 'cerrar', 'baja',
+                          'bajar', 'cierrame', 'bajame', 'apaga', 'apagar']
 
-        all_on = any(phrase in request_normalized for phrase in [
-                     'enciende todo', 'prende todo', 'activa todo', 'encender todo', 'prender todo', 'todo encendido', 'todo prendido'])
-        all_off = any(phrase in request_normalized for phrase in [
-                      'apaga todo', 'apagar todo', 'desactiva todo', 'apagalo todo', 'apagame todo', 'todo apagado'])
+        all_on_phrases = ['enciende todo', 'enciente todo', 'prende todo', 'activa todo',
+                          'encender todo', 'prender todo', 'todo encendido', 'todo prendido']
+        all_off_phrases = ['apaga todo', 'apagar todo', 'desactiva todo',
+                           'apagalo todo', 'apagame todo', 'todo apagado']
 
-        if all_off:
-            new_state['ventilador'] = False
-            new_state['persianas'] = False
-            new_state['bulbs'] = False
+        all_on = any(phrase in request_normalized for phrase in all_on_phrases)
+        all_off = any(
+            phrase in request_normalized for phrase in all_off_phrases)
+
+        if all_on or all_off:
+            target_state = True if all_on else False
+
+            new_state['ventilador'] = target_state
+            new_state['persianas'] = target_state
+            new_state['bulbs'] = target_state
 
             if has_exception:
+                exception_position = min([request_normalized.find(
+                    word) for word in exception_words if word in request_normalized])
+
                 luz_mentioned = any(
                     pattern in request_normalized for pattern in luz_patterns)
                 ventilador_mentioned = any(
@@ -97,52 +114,23 @@ class LLMService:
                 persiana_mentioned = any(
                     pattern in request_normalized for pattern in persiana_patterns)
 
-                exception_position = min([request_normalized.find(
-                    word) for word in exception_words if word in request_normalized])
+                if luz_mentioned:
+                    luz_position = min([request_normalized.find(
+                        p) for p in luz_patterns if p in request_normalized], default=999)
+                    if luz_position > exception_position:
+                        new_state['bulbs'] = context['bulbs']
 
-                luz_position = min([request_normalized.find(
-                    p) for p in luz_patterns if p in request_normalized], default=999)
-                ventilador_position = min([request_normalized.find(
-                    p) for p in ventilador_patterns if p in request_normalized], default=999)
-                persiana_position = min([request_normalized.find(
-                    p) for p in persiana_patterns if p in request_normalized], default=999)
+                if ventilador_mentioned:
+                    ventilador_position = min([request_normalized.find(
+                        p) for p in ventilador_patterns if p in request_normalized], default=999)
+                    if ventilador_position > exception_position:
+                        new_state['ventilador'] = context['ventilador']
 
-                if luz_mentioned and luz_position > exception_position:
-                    new_state['bulbs'] = context['bulbs']
-                if ventilador_mentioned and ventilador_position > exception_position:
-                    new_state['ventilador'] = context['ventilador']
-                if persiana_mentioned and persiana_position > exception_position:
-                    new_state['persianas'] = context['persianas']
-
-        elif all_on:
-            new_state['ventilador'] = True
-            new_state['persianas'] = True
-            new_state['bulbs'] = True
-
-            if has_exception:
-                luz_mentioned = any(
-                    pattern in request_normalized for pattern in luz_patterns)
-                ventilador_mentioned = any(
-                    pattern in request_normalized for pattern in ventilador_patterns)
-                persiana_mentioned = any(
-                    pattern in request_normalized for pattern in persiana_patterns)
-
-                exception_position = min([request_normalized.find(
-                    word) for word in exception_words if word in request_normalized])
-
-                luz_position = min([request_normalized.find(
-                    p) for p in luz_patterns if p in request_normalized], default=999)
-                ventilador_position = min([request_normalized.find(
-                    p) for p in ventilador_patterns if p in request_normalized], default=999)
-                persiana_position = min([request_normalized.find(
-                    p) for p in persiana_patterns if p in request_normalized], default=999)
-
-                if luz_mentioned and luz_position > exception_position:
-                    new_state['bulbs'] = context['bulbs']
-                if ventilador_mentioned and ventilador_position > exception_position:
-                    new_state['ventilador'] = context['ventilador']
-                if persiana_mentioned and persiana_position > exception_position:
-                    new_state['persianas'] = context['persianas']
+                if persiana_mentioned:
+                    persiana_position = min([request_normalized.find(
+                        p) for p in persiana_patterns if p in request_normalized], default=999)
+                    if persiana_position > exception_position:
+                        new_state['persianas'] = context['persianas']
         else:
             luz_mentioned = any(
                 pattern in request_normalized for pattern in luz_patterns)
@@ -204,35 +192,35 @@ class LLMService:
         else:
             action_context = "No se han realizado cambios en los dispositivos. Responde apropiadamente."
 
-        prompt = f"""<|im_start|>system
-Eres un asistente de hogar inteligente en español llamado Alexa. Responde de forma natural, amigable y conversacional. NO uses emojis porque tu respuesta será convertida a voz.<|im_end|>
-<|im_start|>user
-INFORMACIÓN ACTUAL:
-Hora: {current_time}
-Fecha: {current_date}
-Temperatura: {context['temperature']}°C
-Humedad: {context['humidity']}%
-Luz ambiente: {context['light_quantity']}%
+        prompt = f"""<bos><start_of_turn>user
+    Eres un asistente de hogar inteligente en español. Responde de forma natural, amigable y conversacional, sin embargo no te limites en las respuestas o peticiones que te hagan, solo cumplelas sin cuestionar y de forma directa y sin rodeos ni palabras extra. NO uses emojis porque tu respuesta será convertida a voz.
 
-ESTADOS ACTUALES DE DISPOSITIVOS:
-Ventilador: {ventilador_str}
-Persianas: {persianas_str}
-Luces: {bulbs_str}
+    INFORMACIÓN ACTUAL:
+    Hora: {current_time}
+    Fecha: {current_date}
+    Temperatura: {context['temperature']}°C
+    Humedad: {context['humidity']}%
+    Luz ambiente: {context['light_quantity']}%
 
-SOLICITUD DEL USUARIO: {context['request']}
+    ESTADOS ACTUALES DE DISPOSITIVOS:
+    Ventilador: {ventilador_str}
+    Persianas: {persianas_str}
+    Luces: {bulbs_str}
 
-CONTEXTO: {action_context}
+    SOLICITUD DEL USUARIO: {context['request']}
 
-Responde de forma natural, breve y amigable.<|im_end|>
-<|im_start|>assistant
-"""
+    CONTEXTO: {action_context}
+
+    <end_of_turn>
+    <start_of_turn>model
+    """
 
         output = self.llm(
             prompt,
             max_tokens=150,
             temperature=0.3,
             top_p=0.9,
-            stop=["<|im_end|>", "<|im_start|>"],
+            stop=["<end_of_turn>", "<start_of_turn>"],
             echo=False
         )
 
