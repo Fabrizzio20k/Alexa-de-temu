@@ -1,27 +1,43 @@
+import subprocess
 from pathlib import Path
 from fastapi import UploadFile
 import shutil
 from app.modelos.whisper_detector import WhisperDetector
-from app.core.config import settings
+
+
+def convert_to_wav(input_audio: Path, output_wav: Path):
+    subprocess.run([
+        "ffmpeg",
+        "-i", str(input_audio),
+        "-ar", "16000",
+        "-ac", "1",
+        "-c:a", "pcm_s16le",
+        str(output_wav)
+    ], check=True)
 
 
 class WhisperService:
     def __init__(self):
         self.detector = WhisperDetector(
-            model_size=settings.WHISPER_MODEL_SIZE,
-            device=settings.WHISPER_DEVICE,
-            compute_type=settings.WHISPER_COMPUTE_TYPE
+            whisper_cli_path=Path("whisper.cpp/build/bin/whisper-cli"),
+            model_path=Path("whisper.cpp/models/ggml-medium.bin")
         )
-        self.temp_dir = Path(settings.TEMP_AUDIO_DIR)
-        self.temp_dir.mkdir(exist_ok=True)
+        self.temp_dir = Path("temp_audio")
+        self.temp_dir.mkdir(exist_ok=True, parents=True)
 
     async def transcribe_audio(self, file: UploadFile) -> str:
-        temp_file = self.temp_dir / file.filename
+        orig_file = self.temp_dir / file.filename
 
-        with open(temp_file, "wb") as buffer:
+        with open(orig_file, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        transcription = self.detector.getCleanTranscription(str(temp_file))
-        temp_file.unlink()
+        if orig_file.suffix.lower() == ".opus":
+            wav_file = self.temp_dir / (orig_file.stem + ".wav")
+            convert_to_wav(orig_file, wav_file)
+            transcription = self.detector.getCleanTranscription(str(wav_file))
+            wav_file.unlink()
+        else:
+            transcription = self.detector.getCleanTranscription(str(orig_file))
 
+        orig_file.unlink()
         return transcription
