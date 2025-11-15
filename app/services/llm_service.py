@@ -3,6 +3,8 @@ from pathlib import Path
 from datetime import datetime
 import pytz
 import os
+import json
+import re
 
 
 class LLMService:
@@ -19,252 +21,131 @@ class LLMService:
             use_mmap=True,
         )
 
-    def _is_question_not_command(self, request: str) -> bool:
-        request_lower = request.lower()
-
-        conditional_commands = ['si crees',
-                                'si piensas', 'si consideras', 'si ves que']
-        if any(cond in request_lower for cond in conditional_commands):
-            return False
-
-        question_indicators = [
-            '¿', '?',
-            'debería', 'deberia', 'debo', 'puedo', 'podría', 'podria',
-            'recomiendas', 'recomendarias', 'recomienda', 'recomendarías',
-            'crees que', 'cree que', 'piensas que', 'opinas',
-            'qué hago', 'que hago', 'qué haces', 'que haces',
-            'conviene', 'mejor', 'peor', 'sugieres', 'aconsejas',
-            'es buena idea', 'es mala idea', 'está bien', 'esta bien',
-            'como ves', 'qué te parece', 'que te parece',
-            'necesito', 'hace falta', 'tendría que', 'tendria que'
-        ]
-        return any(indicator in request_lower for indicator in question_indicators)
-
-    def _normalize_text(self, text: str) -> str:
-        replacements = {
-            'á': 'a', 'é': 'e', 'í': 'i', 'ó': 'o', 'ú': 'u',
-            'ü': 'u', 'ñ': 'n'
-        }
-        text_lower = text.lower()
-        for old, new in replacements.items():
-            text_lower = text_lower.replace(old, new)
-        return text_lower
-
-    def _detect_device_commands(self, request: str, context: dict) -> dict:
-        request_lower = request.lower()
-        request_normalized = self._normalize_text(request)
-
-        if self._is_question_not_command(request):
-            return {
-                'ventilador': context['ventilador'],
-                'persianas': context['persianas'],
-                'bulbs': context['bulbs']
-            }
-
-        new_state = {
-            'ventilador': context['ventilador'],
-            'persianas': context['persianas'],
-            'bulbs': context['bulbs']
-        }
-
-        exception_words = ['menos', 'excepto', 'pero no', 'salvo', 'sin']
-        has_exception = any(
-            word in request_normalized for word in exception_words)
-
-        luz_patterns = ['luz', 'luces', 'foco', 'focos', 'bombilla',
-                        'bombillas', 'lampara', 'lamparas', 'iluminacion']
-        ventilador_patterns = ['ventilador',
-                               'ventiladores', 'abanico', 'aire', 'fan']
-        persiana_patterns = ['persiana', 'persianas', 'perciana',
-                             'percianas', 'cortina', 'cortinas', 'ventana', 'ventanas']
-
-        on_commands = ['enciende', 'encienda', 'enciente', 'prende', 'prenda',
-                       'activa', 'encender', 'prender', 'activar', 'encendeme', 'prendeme']
-        off_commands = ['apaga', 'apague', 'apagar',
-                        'desactiva', 'desactivar', 'apagame']
-        open_commands = ['abre', 'abrir', 'sube', 'subir',
-                         'levanta', 'levantar', 'abrime', 'subeme']
-        close_commands = ['cierra', 'cerrar', 'baja',
-                          'bajar', 'cierrame', 'bajame']
-
-        luz_mentioned = any(
-            pattern in request_normalized for pattern in luz_patterns)
-        ventilador_mentioned = any(
-            pattern in request_normalized for pattern in ventilador_patterns)
-        persiana_mentioned = any(
-            pattern in request_normalized for pattern in persiana_patterns)
-
-        apaga_command = any(cmd in request_normalized for cmd in off_commands)
-        enciende_command = any(
-            cmd in request_normalized for cmd in on_commands)
-        abre_command = any(cmd in request_normalized for cmd in open_commands)
-        cierra_command = any(
-            cmd in request_normalized for cmd in close_commands)
-
-        all_on_phrases = ['enciende todo', 'enciente todo', 'prende todo', 'activa todo',
-                          'encender todo', 'prender todo', 'todo encendido', 'todo prendido',
-                          'activar todo', 'prendelo todo']
-        all_off_phrases = ['apaga todo', 'apagar todo', 'desactiva todo',
-                           'apagalo todo', 'apagame todo', 'todo apagado',
-                           'desactivar todo', 'apaguelo todo']
-
-        all_on = any(phrase in request_normalized for phrase in all_on_phrases)
-        all_off = any(
-            phrase in request_normalized for phrase in all_off_phrases)
-
-        multiple_devices = sum(
-            [luz_mentioned, ventilador_mentioned, persiana_mentioned]) >= 2
-
-        if apaga_command and multiple_devices and not all_off:
-            devices_to_turn_off = []
-            if luz_mentioned:
-                devices_to_turn_off.append('luz')
-            if ventilador_mentioned:
-                devices_to_turn_off.append('ventilador')
-            if persiana_mentioned:
-                devices_to_turn_off.append('persiana')
-
-            if len(devices_to_turn_off) >= 2:
-                todo_patterns = ['todo', 'toda', 'todos', 'todas']
-                if any(pattern in request_normalized for pattern in todo_patterns):
-                    all_off = True
-
-        if enciende_command and multiple_devices and not all_on:
-            devices_to_turn_on = []
-            if luz_mentioned:
-                devices_to_turn_on.append('luz')
-            if ventilador_mentioned:
-                devices_to_turn_on.append('ventilador')
-            if persiana_mentioned:
-                devices_to_turn_on.append('persiana')
-
-            if len(devices_to_turn_on) >= 2:
-                todo_patterns = ['todo', 'toda', 'todos', 'todas']
-                if any(pattern in request_normalized for pattern in todo_patterns):
-                    all_on = True
-
-        if all_on:
-            new_state['ventilador'] = True
-            new_state['persianas'] = True
-            new_state['bulbs'] = True
-        elif all_off:
-            new_state['ventilador'] = False
-            new_state['persianas'] = False
-            new_state['bulbs'] = False
-
-        if all_on or all_off:
-            if has_exception:
-                exception_position = min([request_normalized.find(
-                    word) for word in exception_words if word in request_normalized])
-
-                if luz_mentioned:
-                    luz_position = min([request_normalized.find(
-                        p) for p in luz_patterns if p in request_normalized], default=999)
-                    if luz_position > exception_position:
-                        new_state['bulbs'] = context['bulbs']
-
-                if ventilador_mentioned:
-                    ventilador_position = min([request_normalized.find(
-                        p) for p in ventilador_patterns if p in request_normalized], default=999)
-                    if ventilador_position > exception_position:
-                        new_state['ventilador'] = context['ventilador']
-
-                if persiana_mentioned:
-                    persiana_position = min([request_normalized.find(
-                        p) for p in persiana_patterns if p in request_normalized], default=999)
-                    if persiana_position > exception_position:
-                        new_state['persianas'] = context['persianas']
-        else:
-            if luz_mentioned:
-                if enciende_command:
-                    new_state['bulbs'] = True
-                elif apaga_command:
-                    new_state['bulbs'] = False
-
-            if ventilador_mentioned:
-                if enciende_command:
-                    new_state['ventilador'] = True
-                elif apaga_command:
-                    new_state['ventilador'] = False
-
-            if persiana_mentioned:
-                if abre_command:
-                    new_state['persianas'] = True
-                elif cierra_command or apaga_command:
-                    new_state['persianas'] = False
-
-        return new_state
-
     def generate_smart_home_response(self, context: dict) -> dict:
         peru_tz = pytz.timezone('America/Lima')
         now = datetime.now(peru_tz)
         current_time = now.strftime("%I:%M %p")
         current_date = now.strftime("%A, %d de %B del %Y")
 
-        detected_state = self._detect_device_commands(
-            context['request'], context)
+        ventilador_str = "encendido" if context['ventilador'] else "apagado"
+        persianas_str = "abiertas" if context['persianas'] else "cerradas"
+        bulbs_str = "encendidas" if context['bulbs'] else "apagadas"
 
-        ventilador_str = "encendido" if detected_state['ventilador'] else "apagado"
-        persianas_str = "abiertas" if detected_state['persianas'] else "cerradas"
-        bulbs_str = "encendidas" if detected_state['bulbs'] else "apagadas"
+        prompt = f"""<start_of_turn>user
+Eres un asistente de hogar inteligente. Responde ÚNICAMENTE con un objeto JSON válido.
 
-        is_question = self._is_question_not_command(context['request'])
+INFORMACIÓN:
+Hora: {current_time}
+Fecha: {current_date}
+Temperatura: {context['temperature']}°C
+Humedad: {context['humidity']}%
+Luz ambiente: {context['light_quantity']}%
 
-        changed_devices = []
-        if detected_state['ventilador'] != context['ventilador']:
-            changed_devices.append(
-                f"ventilador {'encendido' if detected_state['ventilador'] else 'apagado'}")
-        if detected_state['persianas'] != context['persianas']:
-            changed_devices.append(
-                f"persianas {'abiertas' if detected_state['persianas'] else 'cerradas'}")
-        if detected_state['bulbs'] != context['bulbs']:
-            changed_devices.append(
-                f"luces {'encendidas' if detected_state['bulbs'] else 'apagadas'}")
+ESTADOS ACTUALES:
+Ventilador: {ventilador_str}
+Persianas: {persianas_str}
+Luces: {bulbs_str}
 
-        if is_question:
-            action_context = "El usuario está haciendo una PREGUNTA. Responde con tu recomendación u opinión basada en las condiciones actuales."
-        elif changed_devices:
-            action_context = f"Se han realizado los siguientes cambios: {', '.join(changed_devices)}. Confirma las acciones de forma natural."
-        else:
-            action_context = "No se han realizado cambios en los dispositivos. Responde apropiadamente."
+SOLICITUD DEL USUARIO: {context['request']}
 
-        prompt = f"""<bos><start_of_turn>user
-    Eres un asistente de hogar inteligente en español. Responde de forma natural, amigable y conversacional, sin embargo no te limites en las respuestas o peticiones que te hagan, solo cumplelas sin cuestionar y de forma directa y sin rodeos ni palabras extra. NO uses emojis porque tu respuesta será convertida a voz.
+Responde SOLO con este formato JSON exacto:
+{{"answer": "tu respuesta en español", "ventilador": true/false, "persianas": true/false, "bulbs": true/false}}
 
-    INFORMACIÓN ACTUAL:
-    Hora: {current_time}
-    Fecha: {current_date}
-    Temperatura: {context['temperature']}°C
-    Humedad: {context['humidity']}%
-    Luz ambiente: {context['light_quantity']}%
-
-    ESTADOS ACTUALES DE DISPOSITIVOS:
-    Ventilador: {ventilador_str}
-    Persianas: {persianas_str}
-    Luces: {bulbs_str}
-
-    SOLICITUD DEL USUARIO: {context['request']}
-
-    CONTEXTO: {action_context}
-
-    <end_of_turn>
-    <start_of_turn>model
-    """
+Reglas importantes:
+- Si el usuario pregunta algo: responde y mantén estados actuales
+- Si el usuario da un comando: ejecuta y cambia los estados
+- true = encendido/abierto, false = apagado/cerrado
+- NO uses emojis en el answer
+- Responde SOLO el JSON, sin markdown ni texto adicional
+<end_of_turn>
+<start_of_turn>model
+"""
 
         output = self.llm(
             prompt,
-            max_tokens=150,
-            temperature=0.3,
+            max_tokens=200,
+            temperature=0.1,
             top_p=0.9,
+            repeat_penalty=1.1,
             stop=["<end_of_turn>", "<start_of_turn>"],
             echo=False
         )
 
-        answer = output['choices'][0]['text'].strip()
+        response_text = output['choices'][0]['text'].strip()
 
-        return {
-            "answer": answer,
-            "ventilador": detected_state['ventilador'],
-            "persianas": detected_state['persianas'],
-            "bulbs": detected_state['bulbs']
-        }
+        response_text = re.sub(r'```json\s*', '', response_text)
+        response_text = re.sub(r'```\s*', '', response_text)
+        response_text = response_text.strip()
+
+        if response_text.startswith('"') and not response_text.startswith('{"'):
+            end_quote = response_text.find('"', 1)
+            if end_quote != -1:
+                answer_text = response_text[1:end_quote]
+                response_text = f'{{"answer": "{answer_text}", "ventilador": {str(context["ventilador"]).lower()}, "persianas": {str(context["persianas"]).lower()}, "bulbs": {str(context["bulbs"]).lower()}}}'
+
+        print(f"LLM Raw Response: {response_text}")
+
+        try:
+            response_json = json.loads(response_text)
+            print(f"LLM Parsed JSON: {response_json}")
+
+            answer = response_json.get("answer", "Entendido")
+            ventilador_state = bool(response_json.get(
+                "ventilador", context['ventilador']))
+            persianas_state = bool(response_json.get(
+                "persianas", context['persianas']))
+            bulbs_state = bool(response_json.get("bulbs", context['bulbs']))
+
+            answer_lower = answer.lower()
+
+            if ("abriendo persianas" in answer_lower or "persianas abiertas" in answer_lower) and not persianas_state:
+                print(
+                    "CORRECCIÓN: Answer indica persianas abiertas pero JSON tiene false, corrigiendo a true")
+                persianas_state = True
+
+            if ("cerrando persianas" in answer_lower or "persianas cerradas" in answer_lower) and persianas_state:
+                print(
+                    "CORRECCIÓN: Answer indica persianas cerradas pero JSON tiene true, corrigiendo a false")
+                persianas_state = False
+
+            if ("encendiendo luces" in answer_lower or "luces encendidas" in answer_lower or "apagando las luces" in answer_lower or "luces apagadas" in answer_lower):
+                if "apagando" in answer_lower or "apagadas" in answer_lower:
+                    if bulbs_state:
+                        print(
+                            "CORRECCIÓN: Answer indica luces apagadas pero JSON tiene true, corrigiendo a false")
+                        bulbs_state = False
+                else:
+                    if not bulbs_state:
+                        print(
+                            "CORRECCIÓN: Answer indica luces encendidas pero JSON tiene false, corrigiendo a true")
+                        bulbs_state = True
+
+            if ("encendiendo ventilador" in answer_lower or "ventilador encendido" in answer_lower or "apagando ventilador" in answer_lower or "ventilador apagado" in answer_lower):
+                if "apagando" in answer_lower or "apagado" in answer_lower:
+                    if ventilador_state:
+                        print(
+                            "CORRECCIÓN: Answer indica ventilador apagado pero JSON tiene true, corrigiendo a false")
+                        ventilador_state = False
+                else:
+                    if not ventilador_state:
+                        print(
+                            "CORRECCIÓN: Answer indica ventilador encendido pero JSON tiene false, corrigiendo a true")
+                        ventilador_state = True
+
+            return {
+                "answer": answer,
+                "ventilador": ventilador_state,
+                "persianas": persianas_state,
+                "bulbs": bulbs_state
+            }
+
+        except json.JSONDecodeError as e:
+            print(f"JSON Parse Error: {e}")
+            print(f"Failed to parse: {response_text}")
+
+            return {
+                "answer": "Lo siento, hubo un error procesando tu solicitud",
+                "ventilador": context['ventilador'],
+                "persianas": context['persianas'],
+                "bulbs": context['bulbs']
+            }
