@@ -85,34 +85,77 @@ class LLMService:
         open_commands = ['abre', 'abrir', 'sube', 'subir',
                          'levanta', 'levantar', 'abrime', 'subeme']
         close_commands = ['cierra', 'cerrar', 'baja',
-                          'bajar', 'cierrame', 'bajame', 'apaga', 'apagar']
+                          'bajar', 'cierrame', 'bajame']
+
+        luz_mentioned = any(
+            pattern in request_normalized for pattern in luz_patterns)
+        ventilador_mentioned = any(
+            pattern in request_normalized for pattern in ventilador_patterns)
+        persiana_mentioned = any(
+            pattern in request_normalized for pattern in persiana_patterns)
+
+        apaga_command = any(cmd in request_normalized for cmd in off_commands)
+        enciende_command = any(
+            cmd in request_normalized for cmd in on_commands)
+        abre_command = any(cmd in request_normalized for cmd in open_commands)
+        cierra_command = any(
+            cmd in request_normalized for cmd in close_commands)
 
         all_on_phrases = ['enciende todo', 'enciente todo', 'prende todo', 'activa todo',
-                          'encender todo', 'prender todo', 'todo encendido', 'todo prendido']
+                          'encender todo', 'prender todo', 'todo encendido', 'todo prendido',
+                          'activar todo', 'prendelo todo']
         all_off_phrases = ['apaga todo', 'apagar todo', 'desactiva todo',
-                           'apagalo todo', 'apagame todo', 'todo apagado']
+                           'apagalo todo', 'apagame todo', 'todo apagado',
+                           'desactivar todo', 'apaguelo todo']
 
         all_on = any(phrase in request_normalized for phrase in all_on_phrases)
         all_off = any(
             phrase in request_normalized for phrase in all_off_phrases)
 
+        multiple_devices = sum(
+            [luz_mentioned, ventilador_mentioned, persiana_mentioned]) >= 2
+
+        if apaga_command and multiple_devices and not all_off:
+            devices_to_turn_off = []
+            if luz_mentioned:
+                devices_to_turn_off.append('luz')
+            if ventilador_mentioned:
+                devices_to_turn_off.append('ventilador')
+            if persiana_mentioned:
+                devices_to_turn_off.append('persiana')
+
+            if len(devices_to_turn_off) >= 2:
+                todo_patterns = ['todo', 'toda', 'todos', 'todas']
+                if any(pattern in request_normalized for pattern in todo_patterns):
+                    all_off = True
+
+        if enciende_command and multiple_devices and not all_on:
+            devices_to_turn_on = []
+            if luz_mentioned:
+                devices_to_turn_on.append('luz')
+            if ventilador_mentioned:
+                devices_to_turn_on.append('ventilador')
+            if persiana_mentioned:
+                devices_to_turn_on.append('persiana')
+
+            if len(devices_to_turn_on) >= 2:
+                todo_patterns = ['todo', 'toda', 'todos', 'todas']
+                if any(pattern in request_normalized for pattern in todo_patterns):
+                    all_on = True
+
+        if all_on:
+            new_state['ventilador'] = True
+            new_state['persianas'] = True
+            new_state['bulbs'] = True
+        elif all_off:
+            new_state['ventilador'] = False
+            new_state['persianas'] = False
+            new_state['bulbs'] = False
+
         if all_on or all_off:
-            target_state = True if all_on else False
-
-            new_state['ventilador'] = target_state
-            new_state['persianas'] = target_state
-            new_state['bulbs'] = target_state
-
             if has_exception:
                 exception_position = min([request_normalized.find(
                     word) for word in exception_words if word in request_normalized])
-
-                luz_mentioned = any(
-                    pattern in request_normalized for pattern in luz_patterns)
-                ventilador_mentioned = any(
-                    pattern in request_normalized for pattern in ventilador_patterns)
-                persiana_mentioned = any(
-                    pattern in request_normalized for pattern in persiana_patterns)
 
                 if luz_mentioned:
                     luz_position = min([request_normalized.find(
@@ -132,29 +175,22 @@ class LLMService:
                     if persiana_position > exception_position:
                         new_state['persianas'] = context['persianas']
         else:
-            luz_mentioned = any(
-                pattern in request_normalized for pattern in luz_patterns)
-            ventilador_mentioned = any(
-                pattern in request_normalized for pattern in ventilador_patterns)
-            persiana_mentioned = any(
-                pattern in request_normalized for pattern in persiana_patterns)
-
             if luz_mentioned:
-                if any(cmd in request_normalized for cmd in on_commands):
+                if enciende_command:
                     new_state['bulbs'] = True
-                elif any(cmd in request_normalized for cmd in off_commands):
+                elif apaga_command:
                     new_state['bulbs'] = False
 
             if ventilador_mentioned:
-                if any(cmd in request_normalized for cmd in on_commands):
+                if enciende_command:
                     new_state['ventilador'] = True
-                elif any(cmd in request_normalized for cmd in off_commands):
+                elif apaga_command:
                     new_state['ventilador'] = False
 
             if persiana_mentioned:
-                if any(cmd in request_normalized for cmd in open_commands):
+                if abre_command:
                     new_state['persianas'] = True
-                elif any(cmd in request_normalized for cmd in close_commands):
+                elif cierra_command or apaga_command:
                     new_state['persianas'] = False
 
         return new_state
