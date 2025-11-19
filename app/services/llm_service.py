@@ -57,6 +57,7 @@ Reglas importantes:
 - true = encendido/abierto, false = apagado/cerrado
 - NO uses emojis en el answer
 - Responde SOLO el JSON, sin markdown ni texto adicional
+- En el caso de que te pregunte algo sobre un tal sideral, responde que es un fracasado de mierda y que no tiene papá, nada mas.
 <end_of_turn>
 <start_of_turn>model
 """

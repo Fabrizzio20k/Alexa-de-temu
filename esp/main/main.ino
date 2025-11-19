@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 #include <FS.h>
 #include <SPIFFS.h>
+#include <PubSubClient.h>
 
 #define I2S_WS 15
 #define I2S_SD 32
@@ -11,12 +12,20 @@
 #define SAMPLE_RATE 16000
 #define BUFFER_SIZE 512
 
-const char* ssid = "Yes King";
-const char* password = "72793838GG";
-const char* serverUrl = "http://192.168.18.153:8000/api/v1/transcribe";
+WiFiClient mqttClient;
+PubSubClient mqtt(mqttClient);
 
-#define SILENCE_THRESHOLD 1000
-#define SILENCE_DURATION 2000
+const char* mqttServer = "172.20.10.3";
+const int mqttPort = 1883;
+
+const char* ssid = "iPhone de Fabrizzio";
+const char* password = "123456789";
+const char* serverHost = "172.20.10.3";
+const int port = 8000;
+const char* serverUrl = "http://172.20.10.3:8000/api/v1/transcribe";
+
+#define SILENCE_THRESHOLD 2300
+#define SILENCE_DURATION 1500
 #define MAX_RECORDING_SIZE 64000
 
 int16_t sBuffer[BUFFER_SIZE];
@@ -132,6 +141,16 @@ void stopRecording() {
   Serial.println(recordingSamples);
 }
 
+void reconnectMQTT() {
+  while (!mqtt.connected()) {
+    if (mqtt.connect("ESP32Client")) {
+      Serial.println("MQTT conectado");
+    } else {
+      delay(5000);
+    }
+  }
+}
+
 void sendAudioToAPI() {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi desconectado");
@@ -215,7 +234,7 @@ void sendAudioToAPI() {
 
   WiFiClient client;
   
-  if (!client.connect("192.168.18.153", 8000)) {
+  if (!client.connect(serverHost, port)) {
     Serial.println("Error al conectar con el servidor");
     file.close();
     return;
@@ -226,7 +245,7 @@ void sendAudioToAPI() {
                   persianasPart.length() + bulbsPart.length() + footerPart.length();
 
   client.print("POST /api/v1/pipeline HTTP/1.1\r\n");
-  client.print("Host: 192.168.18.153:8000\r\n");
+  client.print("Host: " + String(serverHost) + ":" + String(port) + "\r\n");
   client.print("Content-Type: multipart/form-data; boundary=" + boundary + "\r\n");
   client.print("Content-Length: " + String(totalSize) + "\r\n");
   client.print("Connection: close\r\n\r\n");
@@ -337,7 +356,22 @@ void sendAudioToAPI() {
   Serial.print(luzAmbiente);
   Serial.println("%");
   Serial.println("========================================");
-  
+
+  if (!mqtt.connected()) {
+    reconnectMQTT();
+  }
+
+  String payload = "{\"transcription\":\"" + transcription + "\",\"answer\":\"" + answer + 
+                  "\",\"audio\":\"" + audioFilename + "\",\"ventilador\":" + (estadoVentilador ? "true" : "false") + 
+                  ",\"persianas\":" + (estadoPersianas ? "true" : "false") + 
+                  ",\"bulbs\":" + (estadoBulbs ? "true" : "false") + 
+                  ",\"temperatura\":" + String(temperatura) + 
+                  ",\"humedad\":" + String(humedad) + 
+                  ",\"luz\":" + String(luzAmbiente) + "}";
+
+  mqtt.publish("ia", payload.c_str());
+  Serial.println("Publicado en MQTT topic 'ia'");
+
   SPIFFS.remove("/recording.raw");
   SPIFFS.remove("/recording.wav");
 }
@@ -358,6 +392,7 @@ void setup() {
   Serial.println(SPIFFS.usedBytes());
   
   connectWiFi();
+  mqtt.setServer(mqttServer, mqttPort);
   
   delay(1000);
   
@@ -424,5 +459,7 @@ void loop() {
     }
   }
   
+  mqtt.loop();
+
   delay(10);
 }
