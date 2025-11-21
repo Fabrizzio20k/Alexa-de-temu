@@ -2,19 +2,21 @@
 #include <HTTPClient.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
-#include "driver/i2s.h"
+#include <driver/i2s.h>
 
-const char* ssid = "iPhone de Fabrizzio";
-const char* password = "123456789";
-
-const char* mqttServer = "172.20.10.3";
-const int mqttPort = 1883;
-
-const char* serverUrl = "http://172.20.10.3:8000/api/v1/audio/";
+const char* WIFI_SSID = "Yes King";
+const char* WIFI_PASSWORD = "72793838GG";
+const char* MQTT_SERVER = "192.168.18.153";
+const int MQTT_PORT = 1883;
+const char* AUDIO_SERVER_URL = "http://192.168.18.153:8000/api/v1/audio/";
 
 #define I2S_BCLK 26
 #define I2S_LRCK 27
 #define I2S_DOUT 25
+#define BUFFER_SIZE 512
+#define WAV_HEADER_SIZE 44
+#define DMA_BUFFER_COUNT 8
+#define DMA_BUFFER_LENGTH 1024
 
 WiFiClient wifiClient;
 PubSubClient mqtt(wifiClient);
@@ -24,98 +26,89 @@ bool shouldPlayAudio = false;
 
 void setupI2S(uint32_t sampleRate) {
   i2s_config_t i2s_config = {
-      .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
-      .sample_rate = sampleRate,
-      .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-      .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
-      .communication_format = I2S_COMM_FORMAT_I2S,
-      .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-      .dma_buf_count = 8,
-      .dma_buf_len = 1024,
-      .use_apll = false
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+    .sample_rate = sampleRate,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT,
+    .communication_format = I2S_COMM_FORMAT_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = DMA_BUFFER_COUNT,
+    .dma_buf_len = DMA_BUFFER_LENGTH,
+    .use_apll = false
   };
 
   i2s_pin_config_t pin_config = {
-      .bck_io_num = I2S_BCLK,
-      .ws_io_num = I2S_LRCK,
-      .data_out_num = I2S_DOUT,
-      .data_in_num = -1
+    .bck_io_num = I2S_BCLK,
+    .ws_io_num = I2S_LRCK,
+    .data_out_num = I2S_DOUT,
+    .data_in_num = -1
   };
 
   i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
   i2s_set_pin(I2S_NUM_0, &pin_config);
 }
 
-uint32_t readWavSampleRate(WiFiClient* stream) {
-  uint8_t header[44];
-  stream->readBytes(header, 44);
+uint32_t extractSampleRateFromWav(WiFiClient* stream) {
+  uint8_t header[WAV_HEADER_SIZE];
+  stream->readBytes(header, WAV_HEADER_SIZE);
   
-  uint32_t sampleRate = header[24] | (header[25] << 8) | (header[26] << 16) | (header[27] << 24);
+  uint32_t sampleRate = header[24] | 
+                        (header[25] << 8) | 
+                        (header[26] << 16) | 
+                        (header[27] << 24);
   
   return sampleRate;
 }
 
-void playAudio(String audioFilename) {
-  String audioURL = String(serverUrl) + audioFilename;
+void streamAudioToI2S(WiFiClient* stream) {
+  uint8_t buffer[BUFFER_SIZE];
   
-  Serial.println("Descargando audio: " + audioURL);
+  while (stream->available()) {
+    int bytesRead = stream->readBytes(buffer, BUFFER_SIZE);
+    if (bytesRead > 0) {
+      size_t bytesWritten;
+      i2s_write(I2S_NUM_0, buffer, bytesRead, &bytesWritten, portMAX_DELAY);
+    }
+  }
+}
+
+void playAudio(const String& audioFilename) {
+  String audioURL = String(AUDIO_SERVER_URL) + audioFilename;
+  
+  Serial.println("Descargando: " + audioURL);
 
   HTTPClient http;
   http.begin(audioURL);
   int httpCode = http.GET();
 
   if (httpCode != HTTP_CODE_OK) {
-    Serial.println("Error al obtener archivo");
+    Serial.println("Error HTTP: " + String(httpCode));
     http.end();
     return;
   }
 
   WiFiClient* stream = http.getStreamPtr();
-
-  uint32_t sampleRate = readWavSampleRate(stream);
-  Serial.print("Sample rate detectado: ");
+  uint32_t sampleRate = extractSampleRateFromWav(stream);
+  
+  Serial.print("Sample rate: ");
   Serial.println(sampleRate);
   
   i2s_driver_uninstall(I2S_NUM_0);
   setupI2S(sampleRate);
 
-  const size_t bufferSize = 512;
-  uint8_t buffer[bufferSize];
-
   Serial.println("Reproduciendo...");
-
-  while (http.connected() && stream->available()) {
-    int len = stream->readBytes(buffer, bufferSize);
-    if (len > 0) {
-      size_t written;
-      i2s_write(I2S_NUM_0, buffer, len, &written, portMAX_DELAY);
-    }
-  }
-
+  streamAudioToI2S(stream);
+  
+  delay(350);
   i2s_zero_dma_buffer(I2S_NUM_0);
-  delay(100);
-
-  Serial.println("Audio terminado.");
+  
+  Serial.println("Finalizado");
   http.end();
 }
 
-void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  Serial.println("Mensaje recibido en topic: " + String(topic));
-  
-  StaticJsonDocument<512> doc;
-  DeserializationError error = deserializeJson(doc, payload, length);
-  
-  if (error) {
-    Serial.println("Error parseando JSON");
-    return;
-  }
-  
+void processIncomingMessage(const JsonDocument& doc) {
   String audioFilename = doc["audio"].as<String>();
-  String transcription = doc["transcription"].as<String>();
-  String answer = doc["answer"].as<String>();
   
-  Serial.println("Transcripcion: " + transcription);
-  Serial.println("Respuesta: " + answer);
   Serial.println("Audio: " + audioFilename);
   
   if (audioFilename.length() > 0) {
@@ -124,46 +117,75 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
 }
 
-void reconnectMQTT() {
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  Serial.println("Mensaje MQTT recibido");
+  
+  StaticJsonDocument<512> doc;
+  DeserializationError error = deserializeJson(doc, payload, length);
+  
+  if (error) {
+    Serial.println("Error parseando JSON: " + String(error.c_str()));
+    return;
+  }
+  
+  processIncomingMessage(doc);
+}
+
+void connectMQTT() {
   while (!mqtt.connected()) {
     Serial.println("Conectando a MQTT...");
-    if (mqtt.connect("ESP32Speaker")) {
+    
+    String clientId = "ESP32Speaker-" + String(random(0xffff), HEX);
+    
+    if (mqtt.connect(clientId.c_str())) {
       Serial.println("MQTT conectado");
       mqtt.subscribe("ia");
-      Serial.println("Suscrito a topic 'ia'");
+      Serial.println("Suscrito a 'ia'");
     } else {
-      Serial.println("Error MQTT, reintentando en 5s");
+      Serial.print("Error MQTT: ");
+      Serial.println(mqtt.state());
       delay(5000);
     }
   }
 }
 
-void setup() {
-  Serial.begin(115200);
-  delay(500);
-
+void connectWiFi() {
   Serial.println("Conectando a WiFi...");
-  WiFi.begin(ssid, password);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  
   while (WiFi.status() != WL_CONNECTED) {
     delay(300);
     Serial.print(".");
   }
-  Serial.println("\nWiFi conectado!");
+  
+  Serial.println("\nWiFi conectado");
+  Serial.print("IP: ");
   Serial.println(WiFi.localIP());
+}
 
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  
+  randomSeed(micros());
+  
+  connectWiFi();
   setupI2S(22050);
   
-  mqtt.setServer(mqttServer, mqttPort);
+  mqtt.setServer(MQTT_SERVER, MQTT_PORT);
   mqtt.setCallback(mqttCallback);
   mqtt.setBufferSize(512);
   
-  reconnectMQTT();
+  connectMQTT();
+  
+  Serial.println("Sistema listo");
 }
 
 void loop() {
   if (!mqtt.connected()) {
-    reconnectMQTT();
+    connectMQTT();
   }
+  
   mqtt.loop();
   
   if (shouldPlayAudio && pendingAudio.length() > 0) {

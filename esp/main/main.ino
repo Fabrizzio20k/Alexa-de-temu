@@ -1,6 +1,5 @@
 #include <driver/i2s.h>
 #include <WiFi.h>
-#include <HTTPClient.h>
 #include <FS.h>
 #include <SPIFFS.h>
 #include <PubSubClient.h>
@@ -12,25 +11,25 @@
 #define SAMPLE_RATE 16000
 #define BUFFER_SIZE 512
 
-WiFiClient mqttClient;
-PubSubClient mqtt(mqttClient);
-
-const char* mqttServer = "172.20.10.3";
-const int mqttPort = 1883;
-
-const char* ssid = "iPhone de Fabrizzio";
-const char* password = "123456789";
-const char* serverHost = "172.20.10.3";
-const int port = 8000;
-const char* serverUrl = "http://172.20.10.3:8000/api/v1/transcribe";
-
 #define SILENCE_THRESHOLD 2300
 #define SILENCE_DURATION 1500
 #define MAX_RECORDING_SIZE 64000
 
+const char* WIFI_SSID = "Yes King";
+const char* WIFI_PASSWORD = "72793838GG";
+const char* SERVER_HOST = "192.168.18.153";
+const int SERVER_PORT = 8000;
+const char* MQTT_SERVER = "192.168.18.153";
+const int MQTT_PORT = 1883;
+const unsigned long MQTT_RECONNECT_INTERVAL = 5000;
+
+WiFiClient mqttClient;
+PubSubClient mqtt(mqttClient);
+
 int16_t sBuffer[BUFFER_SIZE];
 bool isRecording = false;
 unsigned long lastSoundTime = 0;
+unsigned long lastMqttAttempt = 0;
 File recordingFile;
 int recordingSamples = 0;
 
@@ -41,7 +40,7 @@ float temperatura = 20.0;
 float humedad = 20.0;
 float luzAmbiente = 20.0;
 
-void i2s_install() {
+void setupI2S() {
   const i2s_config_t i2s_config = {
     .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = SAMPLE_RATE,
@@ -54,10 +53,6 @@ void i2s_install() {
     .use_apll = false
   };
 
-  i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
-}
-
-void i2s_setpin() {
   const i2s_pin_config_t pin_config = {
     .bck_io_num = I2S_SCK,
     .ws_io_num = I2S_WS,
@@ -65,41 +60,64 @@ void i2s_setpin() {
     .data_in_num = I2S_SD
   };
 
+  i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
   i2s_set_pin(I2S_PORT, &pin_config);
+  i2s_start(I2S_PORT);
 }
 
 void connectWiFi() {
   Serial.println("Conectando a WiFi...");
-  WiFi.begin(ssid, password);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
   
-  Serial.println("");
-  Serial.println("WiFi conectado!");
-  Serial.print("IP del ESP32: ");
+  Serial.println("\nWiFi conectado!");
+  Serial.print("IP: ");
   Serial.println(WiFi.localIP());
+}
+
+void setupMQTT() {
+  mqtt.setServer(MQTT_SERVER, MQTT_PORT);
+  mqtt.setBufferSize(256);
+  mqtt.setKeepAlive(15);
+  mqtt.setSocketTimeout(15);
+  randomSeed(micros());
+}
+
+void reconnectMQTT() {
+  if (mqtt.connected() || millis() - lastMqttAttempt < MQTT_RECONNECT_INTERVAL) {
+    return;
+  }
+  
+  lastMqttAttempt = millis();
+  String clientId = "ESP32-" + String(random(0xffff), HEX);
+  
+  if (mqtt.connect(clientId.c_str())) {
+    Serial.println("MQTT conectado");
+  } else {
+    Serial.print("MQTT fallo: ");
+    Serial.println(mqtt.state());
+  }
 }
 
 void writeWavHeader(File &file, int dataSize) {
   int subchunk2Size = dataSize * 2;
   int chunkSize = 36 + subchunk2Size;
-
-  file.write((const uint8_t*)"RIFF", 4);
-  file.write((const uint8_t*)&chunkSize, 4);
-  file.write((const uint8_t*)"WAVE", 4);
-  file.write((const uint8_t*)"fmt ", 4);
-  
-  int subchunk1Size = 16;
   int16_t audioFormat = 1;
   int16_t numChannels = 1;
   int sampleRate = SAMPLE_RATE;
   int byteRate = SAMPLE_RATE * 2;
   int16_t blockAlign = 2;
   int16_t bitsPerSample = 16;
-  
+  int subchunk1Size = 16;
+
+  file.write((const uint8_t*)"RIFF", 4);
+  file.write((const uint8_t*)&chunkSize, 4);
+  file.write((const uint8_t*)"WAVE", 4);
+  file.write((const uint8_t*)"fmt ", 4);
   file.write((const uint8_t*)&subchunk1Size, 4);
   file.write((const uint8_t*)&audioFormat, 2);
   file.write((const uint8_t*)&numChannels, 2);
@@ -112,14 +130,18 @@ void writeWavHeader(File &file, int dataSize) {
 }
 
 void startRecording() {
-  if (SPIFFS.exists("/recording.raw")) {
-    SPIFFS.remove("/recording.raw");
+  if (recordingFile) {
+    recordingFile.close();
   }
+  
+  SPIFFS.remove("/recording.raw");
+  delay(50);
   
   recordingFile = SPIFFS.open("/recording.raw", FILE_WRITE);
   
   if (!recordingFile) {
-    Serial.println("Error al crear archivo de grabacion");
+    Serial.println("Error creando archivo");
+    isRecording = false;
     return;
   }
   
@@ -129,54 +151,70 @@ void startRecording() {
 }
 
 void stopRecording() {
+  isRecording = false;
+  
   if (recordingFile) {
     recordingFile.flush();
     recordingFile.close();
-    delay(100);
   }
   
-  isRecording = false;
-  Serial.println("*** GRABACION FINALIZADA ***");
-  Serial.print("Muestras grabadas: ");
-  Serial.println(recordingSamples);
+  Serial.print("*** GRABACION FINALIZADA: ");
+  Serial.print(recordingSamples);
+  Serial.println(" muestras ***");
 }
 
-void reconnectMQTT() {
-  while (!mqtt.connected()) {
-    if (mqtt.connect("ESP32Client")) {
-      Serial.println("MQTT conectado");
-    } else {
-      delay(5000);
-    }
-  }
+String extractJsonValue(const String &json, const String &key) {
+  int startPos = json.indexOf("\"" + key + "\":\"");
+  if (startPos == -1) return "";
+  
+  startPos += key.length() + 4;
+  int endPos = json.indexOf("\"", startPos);
+  
+  return json.substring(startPos, endPos);
 }
 
-void sendAudioToAPI() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi desconectado");
-    return;
+bool extractJsonBool(const String &json, const String &key) {
+  int pos = json.indexOf("\"" + key + "\":");
+  if (pos == -1) return false;
+  
+  int valueStart = pos + key.length() + 3;
+  String remaining = json.substring(valueStart);
+  
+  int truePos = remaining.indexOf("true");
+  int falsePos = remaining.indexOf("false");
+  int commaPos = remaining.indexOf(",");
+  int bracePos = remaining.indexOf("}");
+  
+  int endPos = commaPos;
+  if (endPos == -1 || (bracePos != -1 && bracePos < endPos)) {
+    endPos = bracePos;
   }
-
-  if (!SPIFFS.exists("/recording.raw")) {
-    Serial.println("Archivo raw no existe");
-    return;
+  
+  if (truePos != -1 && truePos < endPos) {
+    return true;
   }
-
-  if (SPIFFS.exists("/recording.wav")) {
-    SPIFFS.remove("/recording.wav");
+  
+  if (falsePos != -1 && falsePos < endPos) {
+    return false;
   }
+  
+  return false;
+}
 
+File convertToWav() {
   File rawFile = SPIFFS.open("/recording.raw", FILE_READ);
   if (!rawFile) {
-    Serial.println("Error al abrir archivo raw");
-    return;
+    Serial.println("Error abriendo raw");
+    return File();
   }
 
+  SPIFFS.remove("/recording.wav");
   File wavFile = SPIFFS.open("/recording.wav", FILE_WRITE);
+  
   if (!wavFile) {
-    Serial.println("Error al crear archivo wav");
+    Serial.println("Error creando wav");
     rawFile.close();
-    return;
+    return File();
   }
 
   writeWavHeader(wavFile, recordingSamples);
@@ -190,97 +228,98 @@ void sendAudioToAPI() {
   rawFile.close();
   wavFile.flush();
   wavFile.close();
-  delay(200);
+  
+  return SPIFFS.open("/recording.wav", FILE_READ);
+}
 
-  File file = SPIFFS.open("/recording.wav", FILE_READ);
-  if (!file) {
-    Serial.println("Error al abrir wav final");
+String buildMultipartBody(const String &boundary) {
+  String body = "\r\n--" + boundary + "\r\n";
+  body += "Content-Disposition: form-data; name=\"temperature\"\r\n\r\n";
+  body += String(temperatura) + "\r\n";
+  
+  body += "--" + boundary + "\r\n";
+  body += "Content-Disposition: form-data; name=\"light_quantity\"\r\n\r\n";
+  body += String(luzAmbiente) + "\r\n";
+  
+  body += "--" + boundary + "\r\n";
+  body += "Content-Disposition: form-data; name=\"humidity\"\r\n\r\n";
+  body += String(humedad) + "\r\n";
+  
+  body += "--" + boundary + "\r\n";
+  body += "Content-Disposition: form-data; name=\"ventilador\"\r\n\r\n";
+  body += estadoVentilador ? "true\r\n" : "false\r\n";
+  
+  body += "--" + boundary + "\r\n";
+  body += "Content-Disposition: form-data; name=\"persianas\"\r\n\r\n";
+  body += estadoPersianas ? "true\r\n" : "false\r\n";
+  
+  body += "--" + boundary + "\r\n";
+  body += "Content-Disposition: form-data; name=\"bulbs\"\r\n\r\n";
+  body += estadoBulbs ? "true\r\n" : "false\r\n";
+  
+  body += "--" + boundary + "--\r\n";
+  
+  return body;
+}
+
+void sendAudioToAPI() {
+  if (WiFi.status() != WL_CONNECTED || !SPIFFS.exists("/recording.raw")) {
     return;
   }
 
-  int fileSize = file.size();
+  File wavFile = convertToWav();
+  if (!wavFile) {
+    SPIFFS.remove("/recording.raw");
+    return;
+  }
 
-  String boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW";
-  
+  WiFiClient client;
+  if (!client.connect(SERVER_HOST, SERVER_PORT)) {
+    Serial.println("Error conectando al servidor");
+    wavFile.close();
+    SPIFFS.remove("/recording.raw");
+    SPIFFS.remove("/recording.wav");
+    return;
+  }
+
+  String boundary = "----ESP32Boundary";
   String headerPart = "--" + boundary + "\r\n";
   headerPart += "Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n";
   headerPart += "Content-Type: audio/wav\r\n\r\n";
   
-  String temperaturePart = "\r\n--" + boundary + "\r\n";
-  temperaturePart += "Content-Disposition: form-data; name=\"temperature\"\r\n\r\n";
-  temperaturePart += String(temperatura) + "\r\n";
-  
-  String lightPart = "--" + boundary + "\r\n";
-  lightPart += "Content-Disposition: form-data; name=\"light_quantity\"\r\n\r\n";
-  lightPart += String(luzAmbiente) + "\r\n";
-  
-  String humidityPart = "--" + boundary + "\r\n";
-  humidityPart += "Content-Disposition: form-data; name=\"humidity\"\r\n\r\n";
-  humidityPart += String(humedad) + "\r\n";
-  
-  String ventiladorPart = "--" + boundary + "\r\n";
-  ventiladorPart += "Content-Disposition: form-data; name=\"ventilador\"\r\n\r\n";
-  ventiladorPart += (estadoVentilador ? "true" : "false") + String("\r\n");
-  
-  String persianasPart = "--" + boundary + "\r\n";
-  persianasPart += "Content-Disposition: form-data; name=\"persianas\"\r\n\r\n";
-  persianasPart += (estadoPersianas ? "true" : "false") + String("\r\n");
-  
-  String bulbsPart = "--" + boundary + "\r\n";
-  bulbsPart += "Content-Disposition: form-data; name=\"bulbs\"\r\n\r\n";
-  bulbsPart += (estadoBulbs ? "true" : "false") + String("\r\n");
-  
-  String footerPart = "--" + boundary + "--\r\n";
-
-  WiFiClient client;
-  
-  if (!client.connect(serverHost, port)) {
-    Serial.println("Error al conectar con el servidor");
-    file.close();
-    return;
-  }
-
-  int totalSize = headerPart.length() + fileSize + temperaturePart.length() + 
-                  lightPart.length() + humidityPart.length() + ventiladorPart.length() + 
-                  persianasPart.length() + bulbsPart.length() + footerPart.length();
+  String bodyPart = buildMultipartBody(boundary);
+  int totalSize = headerPart.length() + wavFile.size() + bodyPart.length();
 
   client.print("POST /api/v1/pipeline HTTP/1.1\r\n");
-  client.print("Host: " + String(serverHost) + ":" + String(port) + "\r\n");
+  client.print("Host: " + String(SERVER_HOST) + "\r\n");
   client.print("Content-Type: multipart/form-data; boundary=" + boundary + "\r\n");
   client.print("Content-Length: " + String(totalSize) + "\r\n");
   client.print("Connection: close\r\n\r\n");
-  
   client.print(headerPart);
 
   uint8_t buf[512];
-  while (file.available()) {
-    int bytesRead = file.read(buf, sizeof(buf));
+  while (wavFile.available()) {
+    int bytesRead = wavFile.read(buf, sizeof(buf));
     if (bytesRead > 0) {
       client.write(buf, bytesRead);
     }
     yield();
   }
   
-  file.close();
-  
-  client.print(temperaturePart);
-  client.print(lightPart);
-  client.print(humidityPart);
-  client.print(ventiladorPart);
-  client.print(persianasPart);
-  client.print(bulbsPart);
-  client.print(footerPart);
+  wavFile.close();
+  client.print(bodyPart);
 
   unsigned long timeout = millis();
-  while (client.available() == 0) {
-    if (millis() - timeout > 30000) {
-      Serial.println("Timeout esperando respuesta");
-      client.stop();
-      SPIFFS.remove("/recording.raw");
-      SPIFFS.remove("/recording.wav");
-      return;
-    }
+  while (client.available() == 0 && millis() - timeout < 30000) {
     delay(100);
+  }
+
+  if (client.available() == 0) {
+    Serial.println("Timeout");
+    client.stop();
+    SPIFFS.remove("/recording.raw");
+    SPIFFS.remove("/recording.wav");
+    return;
   }
 
   bool headersEnded = false;
@@ -288,7 +327,6 @@ void sendAudioToAPI() {
   
   while (client.available()) {
     String line = client.readStringUntil('\n');
-    
     if (!headersEnded) {
       if (line == "\r" || line.length() == 0) {
         headersEnded = true;
@@ -300,77 +338,49 @@ void sendAudioToAPI() {
 
   client.stop();
 
-  int transcriptionStart = response.indexOf("\"transcription\":\"") + 17;
-  int transcriptionEnd = response.indexOf("\"", transcriptionStart);
-  String transcription = response.substring(transcriptionStart, transcriptionEnd);
-
-  int audioStart = response.indexOf("\"audio_filename\":\"") + 18;
-  int audioEnd = response.indexOf("\"", audioStart);
-  String audioFilename = response.substring(audioStart, audioEnd);
-
-  int answerStart = response.indexOf("\"answer\":\"") + 10;
-  int answerEnd = response.indexOf("\"", answerStart);
-  String answer = response.substring(answerStart, answerEnd);
-
-  int ventiladorPos = response.indexOf("\"ventilador\":");
-  if (ventiladorPos != -1) {
-    int valueStart = ventiladorPos + 13;
-    String valueStr = response.substring(valueStart, valueStart + 5);
-    estadoVentilador = valueStr.indexOf("true") != -1;
-  }
-
-  int persianaPos = response.indexOf("\"persianas\":");
-  if (persianaPos != -1) {
-    int valueStart = persianaPos + 12;
-    String valueStr = response.substring(valueStart, valueStart + 5);
-    estadoPersianas = valueStr.indexOf("true") != -1;
-  }
-
-  int bulbsPos = response.indexOf("\"bulbs\":");
-  if (bulbsPos != -1) {
-    int valueStart = bulbsPos + 8;
-    String valueStr = response.substring(valueStart, valueStart + 5);
-    estadoBulbs = valueStr.indexOf("true") != -1;
-  }
+  String audioPath = extractJsonValue(response, "audio_filename");
+  String transcript = extractJsonValue(response, "transcription");
+  String res = extractJsonValue(response, "answer");
+  estadoVentilador = extractJsonBool(response, "ventilador");
+  estadoPersianas = extractJsonBool(response, "persianas");
+  estadoBulbs = extractJsonBool(response, "bulbs");
 
   Serial.println("========================================");
-  Serial.print("Transcripcion: ");
-  Serial.println(transcription);
-  Serial.print("Respuesta: ");
-  Serial.println(answer);
+  Serial.print("Transcription: ");
+  Serial.println(transcript);
+  Serial.print("Response: ");
+  Serial.println(res);
   Serial.print("Audio: ");
-  Serial.println(audioFilename);
+  Serial.println(audioPath);
   Serial.print("Ventilador: ");
   Serial.println(estadoVentilador ? "ON" : "OFF");
   Serial.print("Persianas: ");
   Serial.println(estadoPersianas ? "ABIERTAS" : "CERRADAS");
   Serial.print("Luces: ");
   Serial.println(estadoBulbs ? "ON" : "OFF");
-  Serial.print("Temperatura: ");
-  Serial.print(temperatura);
-  Serial.println("°C");
-  Serial.print("Humedad: ");
-  Serial.print(humedad);
-  Serial.println("%");
-  Serial.print("Luz ambiente: ");
-  Serial.print(luzAmbiente);
-  Serial.println("%");
   Serial.println("========================================");
 
-  if (!mqtt.connected()) {
+  for (int i = 0; i < 3 && !mqtt.connected(); i++) {
     reconnectMQTT();
+    delay(500);
   }
 
-  String payload = "{\"transcription\":\"" + transcription + "\",\"answer\":\"" + answer + 
-                  "\",\"audio\":\"" + audioFilename + "\",\"ventilador\":" + (estadoVentilador ? "true" : "false") + 
-                  ",\"persianas\":" + (estadoPersianas ? "true" : "false") + 
-                  ",\"bulbs\":" + (estadoBulbs ? "true" : "false") + 
-                  ",\"temperatura\":" + String(temperatura) + 
-                  ",\"humedad\":" + String(humedad) + 
-                  ",\"luz\":" + String(luzAmbiente) + "}";
-
-  mqtt.publish("ia", payload.c_str());
-  Serial.println("Publicado en MQTT topic 'ia'");
+  if (mqtt.connected()) {
+    String payload = "{\"audio\":\"" + audioPath + "\"}";
+    mqtt.loop();
+    delay(100);
+    
+    if (mqtt.publish("ia", payload.c_str(), false)) {
+      mqtt.loop();
+      delay(50);
+      Serial.println("Publicado en MQTT");
+    } else {
+      Serial.print("Error MQTT: ");
+      Serial.println(mqtt.state());
+    }
+  } else {
+    Serial.println("MQTT desconectado");
+  }
 
   SPIFFS.remove("/recording.raw");
   SPIFFS.remove("/recording.wav");
@@ -379,28 +389,29 @@ void sendAudioToAPI() {
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("Inicializando sistema...");
+  Serial.println("Inicializando...");
   
   if (!SPIFFS.begin(true)) {
-    Serial.println("Error montando SPIFFS");
+    Serial.println("Error SPIFFS");
     return;
   }
   
-  Serial.print("SPIFFS total: ");
-  Serial.println(SPIFFS.totalBytes());
-  Serial.print("SPIFFS usado: ");
-  Serial.println(SPIFFS.usedBytes());
+  File root = SPIFFS.open("/");
+  File file = root.openNextFile();
+  while(file) {
+    String fileName = file.name();
+    if (fileName.endsWith(".raw") || fileName.endsWith(".wav")) {
+      SPIFFS.remove(fileName);
+    }
+    file = root.openNextFile();
+  }
   
   connectWiFi();
-  mqtt.setServer(mqttServer, mqttPort);
+  setupMQTT();
+  reconnectMQTT();
+  setupI2S();
   
-  delay(1000);
-  
-  i2s_install();
-  i2s_setpin();
-  i2s_start(I2S_PORT);
-  
-  Serial.println("Sistema listo! Esperando deteccion de voz...");
+  Serial.println("Sistema listo!");
   Serial.print("Memoria libre: ");
   Serial.println(ESP.getFreeHeap());
 }
@@ -411,8 +422,8 @@ void loop() {
 
   if (result == ESP_OK) {
     int samplesRead = bytesIn / sizeof(int16_t);
-    
     int maxAmplitude = 0;
+    
     for (int i = 0; i < samplesRead; i++) {
       int absVal = abs(sBuffer[i]);
       if (absVal > maxAmplitude) {
@@ -422,7 +433,6 @@ void loop() {
     
     if (maxAmplitude > SILENCE_THRESHOLD) {
       lastSoundTime = millis();
-      
       if (!isRecording) {
         startRecording();
       }
@@ -430,36 +440,43 @@ void loop() {
     
     if (isRecording && recordingFile) {
       size_t written = recordingFile.write((const uint8_t*)sBuffer, bytesIn);
+      
       if (written != bytesIn) {
-        Serial.println("Error al escribir en archivo");
+        Serial.println("Error escribiendo");
         stopRecording();
+        SPIFFS.remove("/recording.raw");
         return;
       }
+      
       recordingSamples += samplesRead;
       
       if (millis() - lastSoundTime > SILENCE_DURATION) {
         stopRecording();
-        
         if (recordingSamples > 1000) {
           sendAudioToAPI();
         } else {
-          Serial.println("Grabacion muy corta, descartada");
+          Serial.println("Grabacion muy corta");
           SPIFFS.remove("/recording.raw");
         }
-        
         recordingSamples = 0;
       }
       
       if (recordingSamples >= MAX_RECORDING_SIZE) {
         stopRecording();
-        Serial.println("*** BUFFER LLENO - Enviando ***");
         sendAudioToAPI();
         recordingSamples = 0;
       }
     }
   }
-  
-  mqtt.loop();
+
+  static unsigned long lastMqttLoop = 0;
+  if (millis() - lastMqttLoop > 100) {
+    if (!mqtt.connected()) {
+      reconnectMQTT();
+    }
+    mqtt.loop();
+    lastMqttLoop = millis();
+  }
 
   delay(10);
 }
