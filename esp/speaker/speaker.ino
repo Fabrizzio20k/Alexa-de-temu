@@ -4,11 +4,11 @@
 #include <ArduinoJson.h>
 #include <driver/i2s.h>
 
-const char* WIFI_SSID = "Yes King";
-const char* WIFI_PASSWORD = "72793838GG";
-const char* MQTT_SERVER = "192.168.18.153";
+const char* WIFI_SSID = "iPhone de Fabrizzio";
+const char* WIFI_PASSWORD = "123456789";
+const char* MQTT_SERVER = "172.20.10.2";
 const int MQTT_PORT = 1883;
-const char* AUDIO_SERVER_URL = "http://192.168.18.153:8000/api/v1/audio/";
+const char* AUDIO_SERVER_URL = "http://172.20.10.2:8000/api/v1/audio/";
 
 #define I2S_BCLK 26
 #define I2S_LRCK 27

@@ -15,11 +15,11 @@
 #define SILENCE_DURATION 1500
 #define MAX_RECORDING_SIZE 64000
 
-const char* WIFI_SSID = "Yes King";
-const char* WIFI_PASSWORD = "72793838GG";
-const char* SERVER_HOST = "192.168.18.153";
+const char* WIFI_SSID = "iPhone de Fabrizzio";
+const char* WIFI_PASSWORD = "123456789";
+const char* SERVER_HOST = "172.20.10.2";
 const int SERVER_PORT = 8000;
-const char* MQTT_SERVER = "192.168.18.153";
+const char* MQTT_SERVER = "172.20.10.2";
 const int MQTT_PORT = 1883;
 const unsigned long MQTT_RECONNECT_INTERVAL = 5000;
 
