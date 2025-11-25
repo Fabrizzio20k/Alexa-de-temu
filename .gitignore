@@ -209,3 +209,4 @@ __marimo__/
 models/
 temp_audio/
 whisper.cpp
+.DS_Store
