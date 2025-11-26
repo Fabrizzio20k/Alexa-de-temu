@@ -3,6 +3,8 @@
 #include <FS.h>
 #include <SPIFFS.h>
 #include <PubSubClient.h>
+#include <DHT.h>
+#include <ESP32Servo.h>
 
 #define I2S_WS 15
 #define I2S_SD 32
@@ -14,6 +16,13 @@
 #define SILENCE_THRESHOLD 2300
 #define SILENCE_DURATION 1500
 #define MAX_RECORDING_SIZE 64000
+
+#define DHT_PIN 5
+#define DHT_TYPE DHT11
+#define SERVO_PIN 13
+
+Servo miServo;
+DHT dht(DHT_PIN, DHT_TYPE);
 
 const char* WIFI_SSID = "iPhone de Fabrizzio";
 const char* WIFI_PASSWORD = "123456789";
@@ -39,6 +48,8 @@ bool estadoBulbs = true;
 float temperatura = 20.0;
 float humedad = 20.0;
 float luzAmbiente = 20.0;
+
+int posicionServo = 90;
 
 void setupI2S() {
   const i2s_config_t i2s_config = {
@@ -345,6 +356,9 @@ void sendAudioToAPI() {
   estadoPersianas = extractJsonBool(response, "persianas");
   estadoBulbs = extractJsonBool(response, "bulbs");
 
+  posicionServo = estadoPersianas ? 0 : 90;
+  miServo.write(posicionServo);
+
   Serial.println("========================================");
   Serial.print("Transcription: ");
   Serial.println(transcript);
@@ -410,16 +424,38 @@ void setup() {
   setupMQTT();
   reconnectMQTT();
   setupI2S();
-  
+  dht.begin();
+  miServo.attach(SERVO_PIN);
+  miServo.write(90);
+
+  Serial.println("Servo inicializado");
+  Serial.println("DHT11 inicializado");
   Serial.println("Sistema listo!");
   Serial.print("Memoria libre: ");
   Serial.println(ESP.getFreeHeap());
 }
 
 void loop() {
+  static unsigned long lastDHTRead = 0;
+  if (millis() - lastDHTRead > 2000) {
+    float t = dht.readTemperature();
+    float h = dht.readHumidity();
+    
+    if (!isnan(t) && !isnan(h)) {
+      temperatura = t;
+      humedad = h;
+      Serial.print("Temp: ");
+      Serial.print(temperatura);
+      Serial.print("°C | Humedad: ");
+      Serial.print(humedad);
+      Serial.println("%");
+    }
+    lastDHTRead = millis();
+  }
+
   size_t bytesIn = 0;
   esp_err_t result = i2s_read(I2S_PORT, &sBuffer, BUFFER_SIZE * sizeof(int16_t), &bytesIn, portMAX_DELAY);
-
+  
   if (result == ESP_OK) {
     int samplesRead = bytesIn / sizeof(int16_t);
     int maxAmplitude = 0;
