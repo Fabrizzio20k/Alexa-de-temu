@@ -20,6 +20,9 @@
 #define DHT_PIN 5
 #define DHT_TYPE DHT11
 #define SERVO_PIN 13
+#define LED_PIN 2
+#define LED_BULB1_PIN 25
+#define LED_BULB2_PIN 26
 
 Servo miServo;
 DHT dht(DHT_PIN, DHT_TYPE);
@@ -159,6 +162,7 @@ void startRecording() {
   recordingSamples = 0;
   isRecording = true;
   Serial.println("*** GRABACION INICIADA ***");
+  digitalWrite(LED_PIN, HIGH);
 }
 
 void stopRecording() {
@@ -172,6 +176,7 @@ void stopRecording() {
   Serial.print("*** GRABACION FINALIZADA: ");
   Serial.print(recordingSamples);
   Serial.println(" muestras ***");
+  digitalWrite(LED_PIN, LOW);
 }
 
 String extractJsonValue(const String &json, const String &key) {
@@ -359,6 +364,9 @@ void sendAudioToAPI() {
   posicionServo = estadoPersianas ? 0 : 90;
   miServo.write(posicionServo);
 
+  digitalWrite(LED_BULB1_PIN, estadoBulbs ? HIGH : LOW);
+  digitalWrite(LED_BULB2_PIN, estadoBulbs ? HIGH : LOW);
+
   Serial.println("========================================");
   Serial.print("Transcription: ");
   Serial.println(transcript);
@@ -427,7 +435,15 @@ void setup() {
   dht.begin();
   miServo.attach(SERVO_PIN);
   miServo.write(90);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, LOW);
+  pinMode(LED_BULB1_PIN, OUTPUT);
+  pinMode(LED_BULB2_PIN, OUTPUT);
+  digitalWrite(LED_BULB1_PIN, HIGH);
+  digitalWrite(LED_BULB2_PIN, HIGH);
 
+  Serial.println("LED Grabacion inicializado");
+  Serial.println("LEDs Bulbs inicializados");
   Serial.println("Servo inicializado");
   Serial.println("DHT11 inicializado");
   Serial.println("Sistema listo!");
