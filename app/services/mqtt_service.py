@@ -27,14 +27,11 @@ class MQTTService:
 
     def on_message(self, client, userdata, msg):
         try:
-            print(f"📨 MQTT Message received on topic '{msg.topic}'")
             data = json.loads(msg.payload.decode())
-            print(f"📊 Data: {data}")
 
             with self.lock:
                 self.latest_data = data
                 self.data_queue.put(data)
-                print(f"✅ Data queued for streaming")
         except Exception as e:
             print(f"✗ Error processing message: {e}")
 
