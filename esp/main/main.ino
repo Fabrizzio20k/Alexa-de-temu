@@ -24,6 +24,9 @@
 #define LED_BULB1_PIN 25
 #define LED_BULB2_PIN 26
 
+#define MQTT_DATA_TOPIC "data"
+#define DATA_PUBLISH_INTERVAL 2000
+
 Servo miServo;
 DHT dht(DHT_PIN, DHT_TYPE);
 
@@ -53,6 +56,7 @@ float humedad = 20.0;
 float luzAmbiente = 20.0;
 
 int posicionServo = 90;
+unsigned long lastDataPublish = 0;
 
 void setupI2S() {
   const i2s_config_t i2s_config = {
@@ -408,6 +412,25 @@ void sendAudioToAPI() {
   SPIFFS.remove("/recording.wav");
 }
 
+void publishSensorData() {
+  if (!mqtt.connected()) {
+    return;
+  }
+
+  String payload = "{";
+  payload += "\"temperatura\":" + String(temperatura, 1) + ",";
+  payload += "\"humedad\":" + String(humedad, 1) + ",";
+  payload += "\"luz\":" + String(luzAmbiente, 1) + ",";
+  payload += "\"ventilador\":" + String(estadoVentilador ? "true" : "false") + ",";
+  payload += "\"persianas\":" + String(estadoPersianas ? "true" : "false") + ",";
+  payload += "\"bulbs\":" + String(estadoBulbs ? "true" : "false");
+  payload += "}";
+
+  if (mqtt.publish(MQTT_DATA_TOPIC, payload.c_str(), false)) {
+    Serial.println("Datos publicados en MQTT topic 'data'");
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -528,6 +551,11 @@ void loop() {
     }
     mqtt.loop();
     lastMqttLoop = millis();
+  }
+
+  if (millis() - lastDataPublish >= DATA_PUBLISH_INTERVAL) {
+    publishSensorData();
+    lastDataPublish = millis();
   }
 
   delay(10);
