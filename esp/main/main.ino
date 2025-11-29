@@ -13,7 +13,7 @@
 #define SAMPLE_RATE 16000
 #define BUFFER_SIZE 512
 
-#define SILENCE_THRESHOLD 2300
+#define SILENCE_THRESHOLD 5000
 #define SILENCE_DURATION 1500
 #define MAX_RECORDING_SIZE 64000
 
@@ -26,6 +26,9 @@
 
 #define MQTT_DATA_TOPIC "data"
 #define DATA_PUBLISH_INTERVAL 2000
+
+#define RXD2 16
+#define TXD2 17
 
 Servo miServo;
 DHT dht(DHT_PIN, DHT_TYPE);
@@ -371,6 +374,8 @@ void sendAudioToAPI() {
   digitalWrite(LED_BULB1_PIN, estadoBulbs ? HIGH : LOW);
   digitalWrite(LED_BULB2_PIN, estadoBulbs ? HIGH : LOW);
 
+  sendMotorState();
+
   Serial.println("========================================");
   Serial.print("Transcription: ");
   Serial.println(transcript);
@@ -431,8 +436,29 @@ void publishSensorData() {
   }
 }
 
+void readArduinoData() {
+  if (Serial2.available()) {
+    String data = Serial2.readStringUntil('\n');
+    
+    if (data.startsWith("LUZ:")) {
+      String valorStr = data.substring(4);
+      float valor = valorStr.toFloat();
+      
+      if (valor >= 0 && valor <= 100) {
+        luzAmbiente = valor;
+      }
+    }
+  }
+}
+
+void sendMotorState() {
+  Serial2.print("MOTOR:");
+  Serial2.println(estadoVentilador ? "1" : "0");
+}
+
 void setup() {
   Serial.begin(115200);
+  Serial2.begin(9600, SERIAL_8N1, RXD2, TXD2);
   delay(1000);
   Serial.println("Inicializando...");
   
@@ -475,6 +501,7 @@ void setup() {
 }
 
 void loop() {
+  readArduinoData();
   static unsigned long lastDHTRead = 0;
   if (millis() - lastDHTRead > 2000) {
     float t = dht.readTemperature();
@@ -483,17 +510,12 @@ void loop() {
     if (!isnan(t) && !isnan(h)) {
       temperatura = t;
       humedad = h;
-      Serial.print("Temp: ");
-      Serial.print(temperatura);
-      Serial.print("°C | Humedad: ");
-      Serial.print(humedad);
-      Serial.println("%");
     }
     lastDHTRead = millis();
   }
 
   size_t bytesIn = 0;
-  esp_err_t result = i2s_read(I2S_PORT, &sBuffer, BUFFER_SIZE * sizeof(int16_t), &bytesIn, portMAX_DELAY);
+  esp_err_t result = i2s_read(I2S_PORT, &sBuffer, BUFFER_SIZE * sizeof(int16_t), &bytesIn, 100 / portTICK_PERIOD_MS);
   
   if (result == ESP_OK) {
     int samplesRead = bytesIn / sizeof(int16_t);
@@ -555,6 +577,7 @@ void loop() {
 
   if (millis() - lastDataPublish >= DATA_PUBLISH_INTERVAL) {
     publishSensorData();
+    sendMotorState();
     lastDataPublish = millis();
   }
 
